@@ -8,6 +8,9 @@ import (
 	"github.com/aws/aws-sdk-go/service/kinesis"
 	"github.com/aws/aws-sdk-go/service/kinesis/kinesisiface"
 	"github.com/gofrs/uuid"
+	"github.com/influxdata/telegraf"
+	"github.com/influxdata/telegraf/plugins/serializers"
+	"github.com/influxdata/telegraf/plugins/serializers/influx"
 	"github.com/influxdata/telegraf/testutil"
 	"github.com/stretchr/testify/assert"
 )
@@ -227,6 +230,263 @@ func TestWriteKinesis_WhenServiceError(t *testing.T) {
 	})
 }
 
+func TestWrite_NoMetrics(t *testing.T) {
+
+	assert := assert.New(t)
+
+	svc := &mockKinesisPutRecords{}
+
+	serializer := influx.NewSerializer()
+
+	k := KinesisOutput{
+		Log:                  testutil.Logger{},
+		maxRecordsPerRequest: 500,
+		Partition: &Partition{
+			Method: "static",
+			Key:    "partitionKey",
+		},
+		StreamName: "stream",
+		serializer: serializer,
+		svc:        svc,
+	}
+
+	err := k.Write([]telegraf.Metric{})
+	assert.Nil(err, "Should not return error")
+
+	svc.AssertRequests(assert, []*kinesis.PutRecordsInput{})
+}
+
+func TestWrite_SingleMetric_SingleRequest(t *testing.T) {
+
+	assert := assert.New(t)
+
+	partitionKey := "partitionKey"
+	streamName := "stream"
+
+	svc := &mockKinesisPutRecords{}
+	svc.SetupSuccessfulResponse(1)
+
+	serializer := influx.NewSerializer()
+
+	k := KinesisOutput{
+		Log:                  testutil.Logger{},
+		maxRecordsPerRequest: 500,
+		Partition: &Partition{
+			Method: "static",
+			Key:    partitionKey,
+		},
+		StreamName: streamName,
+		serializer: serializer,
+		svc:        svc,
+	}
+
+	metric := testutil.TestMetric(1)
+	metricData := serializeMetric(serializer, metric, assert)
+
+	err := k.Write([]telegraf.Metric{
+		metric,
+	})
+	assert.Nil(err, "Should not return error")
+
+	svc.AssertRequests(assert, []*kinesis.PutRecordsInput{
+		{
+			StreamName: &streamName,
+			Records: []*kinesis.PutRecordsRequestEntry{
+				{
+					PartitionKey: &partitionKey,
+					Data:         metricData,
+				},
+			},
+		},
+	})
+}
+
+func TestWrite_MultipleMetrics_SingleRequest(t *testing.T) {
+
+	assert := assert.New(t)
+
+	partitionKey := "partitionKey"
+	streamName := "stream"
+
+	svc := &mockKinesisPutRecords{}
+	svc.SetupSuccessfulResponse(3)
+
+	serializer := influx.NewSerializer()
+
+	k := KinesisOutput{
+		Log:                  testutil.Logger{},
+		maxRecordsPerRequest: 500,
+		Partition: &Partition{
+			Method: "static",
+			Key:    partitionKey,
+		},
+		StreamName: streamName,
+		serializer: serializer,
+		svc:        svc,
+	}
+
+	metric1 := testutil.TestMetric(1, "metric1")
+	metric1Data := serializeMetric(serializer, metric1, assert)
+
+	metric2 := testutil.TestMetric(2, "metric2")
+	metric2Data := serializeMetric(serializer, metric2, assert)
+
+	metric3 := testutil.TestMetric(3, "metric3")
+	metric3Data := serializeMetric(serializer, metric3, assert)
+
+	err := k.Write([]telegraf.Metric{
+		metric1,
+		metric2,
+		metric3,
+	})
+	assert.Nil(err, "Should not return error")
+
+	svc.AssertRequests(assert, []*kinesis.PutRecordsInput{
+		{
+			StreamName: &streamName,
+			Records: []*kinesis.PutRecordsRequestEntry{
+				{
+					PartitionKey: &partitionKey,
+					Data:         metric1Data,
+				},
+				{
+					PartitionKey: &partitionKey,
+					Data:         metric2Data,
+				},
+				{
+					PartitionKey: &partitionKey,
+					Data:         metric3Data,
+				},
+			},
+		},
+	})
+}
+
+func TestWrite_MultipleMetrics_MultipleRequests(t *testing.T) {
+
+	assert := assert.New(t)
+
+	partitionKey := "partitionKey"
+	streamName := "stream"
+
+	svc := &mockKinesisPutRecords{}
+	svc.SetupSuccessfulResponse(2)
+	svc.SetupSuccessfulResponse(1)
+
+	serializer := influx.NewSerializer()
+
+	k := KinesisOutput{
+		Log:                  testutil.Logger{},
+		maxRecordsPerRequest: 2,
+		Partition: &Partition{
+			Method: "static",
+			Key:    partitionKey,
+		},
+		StreamName: streamName,
+		serializer: serializer,
+		svc:        svc,
+	}
+
+	metric1 := testutil.TestMetric(1, "metric1")
+	metric1Data := serializeMetric(serializer, metric1, assert)
+
+	metric2 := testutil.TestMetric(2, "metric2")
+	metric2Data := serializeMetric(serializer, metric2, assert)
+
+	metric3 := testutil.TestMetric(3, "metric3")
+	metric3Data := serializeMetric(serializer, metric3, assert)
+
+	err := k.Write([]telegraf.Metric{
+		metric1,
+		metric2,
+		metric3,
+	})
+	assert.Nil(err, "Should not return error")
+
+	svc.AssertRequests(assert, []*kinesis.PutRecordsInput{
+		{
+			StreamName: &streamName,
+			Records: []*kinesis.PutRecordsRequestEntry{
+				{
+					PartitionKey: &partitionKey,
+					Data:         metric1Data,
+				},
+				{
+					PartitionKey: &partitionKey,
+					Data:         metric2Data,
+				},
+			},
+		},
+		{
+			StreamName: &streamName,
+			Records: []*kinesis.PutRecordsRequestEntry{
+				{
+					PartitionKey: &partitionKey,
+					Data:         metric3Data,
+				},
+			},
+		},
+	})
+}
+
+func TestWrite_SerializerError(t *testing.T) {
+
+	assert := assert.New(t)
+
+	partitionKey := "partitionKey"
+	streamName := "stream"
+
+	svc := &mockKinesisPutRecords{}
+	svc.SetupSuccessfulResponse(2)
+
+	serializer := influx.NewSerializer()
+
+	k := KinesisOutput{
+		Log:                  testutil.Logger{},
+		maxRecordsPerRequest: 500,
+		Partition: &Partition{
+			Method: "static",
+			Key:    partitionKey,
+		},
+		StreamName: streamName,
+		serializer: serializer,
+		svc:        svc,
+	}
+
+	metric1 := testutil.TestMetric(1, "metric1")
+	metric1Data := serializeMetric(serializer, metric1, assert)
+
+	metric2 := testutil.TestMetric(2, "metric2")
+	metric2Data := serializeMetric(serializer, metric2, assert)
+
+	// metric is invalid because of empty name
+	invalidMetric := testutil.TestMetric(3, "")
+
+	err := k.Write([]telegraf.Metric{
+		metric1,
+		invalidMetric,
+		metric2,
+	})
+	assert.Nil(err, "Should not return error")
+
+	// remaining valid metrics should still get written
+	svc.AssertRequests(assert, []*kinesis.PutRecordsInput{
+		{
+			StreamName: &streamName,
+			Records: []*kinesis.PutRecordsRequestEntry{
+				{
+					PartitionKey: &partitionKey,
+					Data:         metric1Data,
+				},
+				{
+					PartitionKey: &partitionKey,
+					Data:         metric2Data,
+				},
+			},
+		},
+	})
+}
+
 type mockKinesisPutRecordsResponse struct {
 	Output *kinesis.PutRecordsOutput
 	Err    error
@@ -243,6 +503,33 @@ func (m *mockKinesisPutRecords) SetupResponse(
 	failedRecordCount int64,
 	records []*kinesis.PutRecordsResultEntry,
 ) {
+
+	m.responses = append(m.responses, &mockKinesisPutRecordsResponse{
+		Err: nil,
+		Output: &kinesis.PutRecordsOutput{
+			FailedRecordCount: &failedRecordCount,
+			Records:           records,
+		},
+	})
+}
+
+func (m *mockKinesisPutRecords) SetupSuccessfulResponse(
+	recordCount int,
+) {
+
+	shard := "shardId-000000000003"
+	failedRecordCount := zero
+
+	records := []*kinesis.PutRecordsResultEntry{}
+	for i := 0; i < recordCount; i++ {
+
+		sequenceNumber := fmt.Sprintf("%d", i)
+
+		records = append(records, &kinesis.PutRecordsResultEntry{
+			SequenceNumber: &sequenceNumber,
+			ShardId:        &shard,
+		})
+	}
 
 	m.responses = append(m.responses, &mockKinesisPutRecordsResponse{
 		Err: nil,
@@ -322,4 +609,15 @@ func (m *mockKinesisPutRecords) AssertRequests(
 			)
 		}
 	}
+}
+
+func serializeMetric(
+	serializer serializers.Serializer,
+	metric telegraf.Metric,
+	assert *assert.Assertions,
+) []byte {
+
+	data, err := serializer.Serialize(metric)
+	assert.Nil(err, "Should serialize test metric")
+	return data
 }
