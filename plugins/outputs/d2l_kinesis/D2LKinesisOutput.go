@@ -1,6 +1,8 @@
 package d2lkinesis
 
 import (
+	"math"
+
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/kinesis"
 	"github.com/aws/aws-sdk-go/service/kinesis/kinesisiface"
@@ -9,6 +11,13 @@ import (
 	"github.com/influxdata/telegraf/plugins/outputs"
 	"github.com/influxdata/telegraf/plugins/serializers"
 )
+
+const defaultMaxRecordRetries = 4
+
+// Limits set by AWS (https://docs.aws.amazon.com/kinesis/latest/APIReference/API_PutRecords.html)
+const awsMaxRecordsPerRequest = 500
+const awsMaxRecordSize = 1000000
+const awsMaxRequestSize = 4000000
 
 type (
 	D2LKinesisOutput struct {
@@ -27,7 +36,6 @@ type (
 		MaxRecordSize    int `toml:"max_record_size"`
 
 		Log                  telegraf.Logger `toml:"-"`
-		maxRecordSize        int
 		maxRecordsPerRequest int
 		serializer           serializers.Serializer
 		svc                  kinesisiface.KinesisAPI
@@ -81,6 +89,8 @@ func (k *D2LKinesisOutput) Description() string {
 
 // Connect to the Output; connect is only called once when the plugin starts
 func (k *D2LKinesisOutput) Connect() error {
+
+	k.maxRecordsPerRequest = calculateMaxRecordsPerRequest(k.MaxRecordSize)
 
 	credentialConfig := &internalaws.CredentialConfig{
 		Region:      k.Region,
@@ -205,7 +215,7 @@ func (k *D2LKinesisOutput) putRecords(
 	records []*kinesis.PutRecordsRequestEntry,
 ) []*kinesis.PutRecordsRequestEntry {
 
-	recordsCount := len(records)
+	totalRecordCount := len(records)
 
 	payload := &kinesis.PutRecordsInput{
 		Records:    records,
@@ -217,24 +227,26 @@ func (k *D2LKinesisOutput) putRecords(
 
 		k.Log.Warnf(
 			"Unable to write %+v records to Kinesis : %s",
-			recordsCount,
+			totalRecordCount,
 			err.Error(),
 		)
 		return records
 	}
+
+	successfulRecordCount := int64(totalRecordCount) - *resp.FailedRecordCount
+
+	k.Log.Debugf(
+		"Wrote %+v of %+v record(s) to Kinesis",
+		successfulRecordCount,
+		totalRecordCount,
+	)
 
 	var failedRecords []*kinesis.PutRecordsRequestEntry
 
 	failed := *resp.FailedRecordCount
 	if failed > 0 {
 
-		k.Log.Warnf(
-			"Unable to write %+v of %+v record(s) to Kinesis",
-			failed,
-			recordsCount,
-		)
-
-		for i := 0; i < recordsCount; i++ {
+		for i := 0; i < totalRecordCount; i++ {
 			if resp.Records[i].ErrorCode != nil {
 				failedRecords = append(failedRecords, records[i])
 			}
@@ -248,8 +260,22 @@ func init() {
 	outputs.Add("d2l_kinesis", func() telegraf.Output {
 		return &D2LKinesisOutput{
 
-			// Limit set by AWS (https://docs.aws.amazon.com/kinesis/latest/APIReference/API_PutRecords.html)
-			maxRecordsPerRequest: 500,
+			MaxRecordRetries: defaultMaxRecordRetries,
+			MaxRecordSize:    awsMaxRecordSize,
 		}
 	})
+}
+
+func calculateMaxRecordsPerRequest(
+	maxRecordSize int,
+) int {
+
+	maxRequestSize := float64(awsMaxRequestSize)
+	maxRecordsPerRequest := int(math.Floor(maxRequestSize / float64(maxRecordSize)))
+
+	if maxRecordsPerRequest > awsMaxRecordsPerRequest {
+		return awsMaxRecordsPerRequest
+	}
+
+	return maxRecordsPerRequest
 }

@@ -12,7 +12,7 @@ import (
 	"github.com/influxdata/telegraf/plugins/serializers"
 )
 
-const maxEmitRecordThreshold = 750000
+const gzipHeaderFooterSize = 18 // gzip header (10) + footer size (8)
 
 func createGZipKinesisRecordGenerator(
 	log telegraf.Logger,
@@ -95,7 +95,7 @@ func (g *gzipKinesisRecordGenerator) Next() (*kinesis.PutRecordsRequestEntry, er
 	g.writer.Reset(g.buffer)
 
 	index := startIndex
-	recordSize := 18 // gzip header + footer size
+	recordSize := gzipHeaderFooterSize
 
 	for ; index < g.metricsCount; index++ {
 		metric := g.metrics[index]
@@ -117,7 +117,7 @@ func (g *gzipKinesisRecordGenerator) Next() (*kinesis.PutRecordsRequestEntry, er
 
 			if index == startIndex {
 				g.log.Warnf(
-					"Dropping excessively large metric: %s",
+					"Dropping excessively large '%s' metric",
 					metric.Name(),
 				)
 				continue
