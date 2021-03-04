@@ -12,7 +12,7 @@ import (
 	"github.com/influxdata/telegraf/plugins/serializers"
 )
 
-const defaultMaxRecordRetries = 4
+const defaultMaxRecordRetries = 10
 
 // Limits set by AWS (https://docs.aws.amazon.com/kinesis/latest/APIReference/API_PutRecords.html)
 const awsMaxRecordsPerRequest = 500
