@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/flate"
 	"compress/gzip"
+	"math"
 
 	"github.com/aws/aws-sdk-go/service/kinesis"
 	"github.com/gofrs/uuid"
@@ -27,17 +28,12 @@ func createGZipKinesisRecordGenerator(
 		return nil, writerErr
 	}
 
-	emitRecordThreshold := maxRecordSize
-	if emitRecordThreshold > maxEmitRecordThreshold {
-		emitRecordThreshold = maxEmitRecordThreshold
-	}
-
 	generator := &gzipKinesisRecordGenerator{
-		log:                 log,
-		emitRecordThreshold: emitRecordThreshold,
-		metrics:             metrics,
-		metricsCount:        len(metrics),
-		serializer:          serializer,
+		log:           log,
+		maxRecordSize: maxRecordSize,
+		metrics:       metrics,
+		metricsCount:  len(metrics),
+		serializer:    serializer,
 
 		buffer: buffer,
 		index:  0,
@@ -50,11 +46,11 @@ func createGZipKinesisRecordGenerator(
 type gzipKinesisRecordGenerator struct {
 	kinesisRecordIterator
 
-	log                 telegraf.Logger
-	emitRecordThreshold int
-	metricsCount        int
-	metrics             []telegraf.Metric
-	serializer          serializers.Serializer
+	log           telegraf.Logger
+	maxRecordSize int
+	metricsCount  int
+	metrics       []telegraf.Metric
+	serializer    serializers.Serializer
 
 	buffer *bytes.Buffer
 	index  int
@@ -90,13 +86,16 @@ func (g *gzipKinesisRecordGenerator) emitRecord() (*kinesis.PutRecordsRequestEnt
 
 func (g *gzipKinesisRecordGenerator) Next() (*kinesis.PutRecordsRequestEntry, error) {
 
-	index := g.index
-	if index >= g.metricsCount {
+	startIndex := g.index
+	if startIndex >= g.metricsCount {
 		return nil, nil
 	}
 
 	g.buffer.Reset()
 	g.writer.Reset(g.buffer)
+
+	index := startIndex
+	recordSize := 18 // gzip header + footer size
 
 	for ; index < g.metricsCount; index++ {
 		metric := g.metrics[index]
@@ -111,20 +110,30 @@ func (g *gzipKinesisRecordGenerator) Next() (*kinesis.PutRecordsRequestEntry, er
 			continue
 		}
 
-		_, writeErr := g.writer.Write(bytes)
+		bytesCount := len(bytes)
+		maxCompressedBytes := bytesCount + 5*int((math.Floor(float64(bytesCount)/16383)+1))
+
+		if recordSize+maxCompressedBytes > g.maxRecordSize {
+
+			if index == startIndex {
+				g.log.Warnf(
+					"Dropping excessively large metric: %s",
+					metric.Name(),
+				)
+				continue
+			}
+
+			g.index = index
+			return g.emitRecord()
+		}
+
+		bytesWritten, writeErr := g.writer.Write(bytes)
 		if writeErr != nil {
 			return nil, writeErr
 		}
-
-		flushErr := g.writer.Flush()
-		if flushErr != nil {
-			return nil, flushErr
-		}
-
-		if g.buffer.Len() > g.emitRecordThreshold {
-			return g.emitRecord()
-		}
+		recordSize += bytesWritten
 	}
 
+	g.index = index + 1
 	return g.emitRecord()
 }
