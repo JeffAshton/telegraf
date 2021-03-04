@@ -13,7 +13,8 @@ import (
 	"github.com/influxdata/telegraf/plugins/serializers"
 )
 
-const gzipHeaderFooterSize = 18 // gzip header (10) + footer size (8)
+const gzipHeaderSize = 10
+const gzipFooterSize = 8
 
 func createGZipKinesisRecordGenerator(
 	log telegraf.Logger,
@@ -97,7 +98,7 @@ func (g *gzipKinesisRecordGenerator) Next() (*kinesis.PutRecordsRequestEntry, er
 	g.writer.Reset(g.buffer)
 
 	index := startIndex
-	recordSize := gzipHeaderFooterSize
+	recordSize := gzipHeaderSize + gzipFooterSize
 
 	for ; index < g.metricsCount; index++ {
 		metric := g.metrics[index]
@@ -129,13 +130,19 @@ func (g *gzipKinesisRecordGenerator) Next() (*kinesis.PutRecordsRequestEntry, er
 			return g.yieldRecord()
 		}
 
-		writeCount, writeErr := g.writer.Write(bytes)
+		_, writeErr := g.writer.Write(bytes)
 		if writeErr != nil {
 			return nil, writeErr
 		}
-		recordSize += writeCount
+
+		flushErr := g.writer.Flush()
+		if flushErr != nil {
+			return nil, flushErr
+		}
+
+		recordSize = g.buffer.Len() + gzipFooterSize
 	}
 
-	g.index = index
+	g.index = index + 1
 	return g.yieldRecord()
 }
