@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/flate"
 	"compress/gzip"
+	"encoding/base64"
 	"math"
 
 	"github.com/aws/aws-sdk-go/service/kinesis"
@@ -63,7 +64,8 @@ func (g *gzipKinesisRecordGenerator) getPartitionKey() string {
 		g.log.Errorf("Failed to generate partition key: %s", err.Error())
 		return "default"
 	}
-	return id.String()
+	pk := base64.StdEncoding.EncodeToString(id.Bytes())
+	return pk
 }
 
 func (g *gzipKinesisRecordGenerator) emitRecord() (*kinesis.PutRecordsRequestEntry, error) {

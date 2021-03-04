@@ -1,7 +1,7 @@
 package d2lkinesis
 
 import (
-	"math"
+	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/kinesis"
@@ -16,11 +16,11 @@ const defaultMaxRecordRetries = 4
 
 // Limits set by AWS (https://docs.aws.amazon.com/kinesis/latest/APIReference/API_PutRecords.html)
 const awsMaxRecordsPerRequest = 500
-const awsMaxRecordSize = 1000000
-const awsMaxRequestSize = 4000000
+const awsMaxRecordSize = 1048576  // 1 MiB
+const awsMaxRequestSize = 5242880 // 5 MiB
 
 type (
-	D2LKinesisOutput struct {
+	d2lKinesisOutput struct {
 		Region      string `toml:"region"`
 		AccessKey   string `toml:"access_key"`
 		SecretKey   string `toml:"secret_key"`
@@ -37,6 +37,7 @@ type (
 
 		Log                  telegraf.Logger `toml:"-"`
 		maxRecordsPerRequest int
+		maxRequestSize       int
 		serializer           serializers.Serializer
 		svc                  kinesisiface.KinesisAPI
 	}
@@ -78,19 +79,19 @@ var sampleConfig = `
 `
 
 // SampleConfig returns the default configuration of the Processor
-func (k *D2LKinesisOutput) SampleConfig() string {
+func (k *d2lKinesisOutput) SampleConfig() string {
 	return sampleConfig
 }
 
 // Description returns a one-sentence description on the Processor
-func (k *D2LKinesisOutput) Description() string {
+func (k *d2lKinesisOutput) Description() string {
 	return "Configuration for the D2L AWS Kinesis output."
 }
 
 // Connect to the Output; connect is only called once when the plugin starts
-func (k *D2LKinesisOutput) Connect() error {
+func (k *d2lKinesisOutput) Connect() error {
 
-	k.maxRecordsPerRequest = calculateMaxRecordsPerRequest(k.MaxRecordSize)
+	k.maxRecordsPerRequest = awsMaxRecordsPerRequest
 
 	credentialConfig := &internalaws.CredentialConfig{
 		Region:      k.Region,
@@ -116,17 +117,17 @@ func (k *D2LKinesisOutput) Connect() error {
 // is shutting down. Close will not be called until all writes have finished,
 // and Write() will not be called once Close() has been, so locking is not
 // necessary.
-func (k *D2LKinesisOutput) Close() error {
+func (k *d2lKinesisOutput) Close() error {
 	return nil
 }
 
 // SetSerializer sets the serializer function for the interface.
-func (k *D2LKinesisOutput) SetSerializer(serializer serializers.Serializer) {
+func (k *d2lKinesisOutput) SetSerializer(serializer serializers.Serializer) {
 	k.serializer = serializer
 }
 
 // Write takes in group of points to be written to the Output
-func (k *D2LKinesisOutput) Write(metrics []telegraf.Metric) error {
+func (k *d2lKinesisOutput) Write(metrics []telegraf.Metric) error {
 
 	var recordIterator kinesisRecordIterator
 
@@ -145,39 +146,46 @@ func (k *D2LKinesisOutput) Write(metrics []telegraf.Metric) error {
 		return generatorErr
 	}
 
-	var failedRecords []*kinesis.PutRecordsRequestEntry
-
-	for i := 0; i < k.MaxRecordRetries; i++ {
+	var i int = 0
+	for {
 
 		failedRecords, err := k.putRecordBatches(recordIterator)
 		if err != nil {
 			return err
 		}
-		if len(failedRecords) > 0 {
+
+		failedCount := len(failedRecords)
+		if failedCount == 0 {
 			return nil
 		}
 
+		i++
+		if i > k.MaxRecordRetries {
+
+			k.Log.Warnf(
+				"Unable to write %+v of %+v record(s) to Kinesis after %+v attempts",
+				failedCount,
+				metricsCount,
+				i,
+			)
+
+			return nil
+		}
+
+		k.Log.Debugf(
+			"Retrying %+v record(s)",
+			failedCount,
+		)
 		recordIterator = createKinesisRecordSet(failedRecords)
 	}
-
-	failedCount := len(failedRecords)
-	if failedCount > 0 {
-
-		k.Log.Warnf(
-			"Unable to write %+v of %+v record(s) to Kinesis",
-			failedCount,
-			metricsCount,
-		)
-	}
-
-	return nil
 }
 
-func (k *D2LKinesisOutput) putRecordBatches(
+func (k *d2lKinesisOutput) putRecordBatches(
 	recordIterator kinesisRecordIterator,
 ) ([]*kinesis.PutRecordsRequestEntry, error) {
 
 	batchRecordCount := 0
+	batchRequestSize := 0
 	batch := []*kinesis.PutRecordsRequestEntry{}
 
 	allFailedRecords := []*kinesis.PutRecordsRequestEntry{}
@@ -191,7 +199,20 @@ func (k *D2LKinesisOutput) putRecordBatches(
 			break
 		}
 
+		// Partition keys are included in the limit calculation.
+		// This is assuming partition keys are ASCII.
+		recordRequestSize := len(record.Data) + len(*record.PartitionKey)
+		if batchRequestSize+recordRequestSize > k.maxRequestSize {
+
+			failedRecords := k.putRecords(batch)
+			allFailedRecords = append(allFailedRecords, failedRecords...)
+
+			batchRecordCount = 0
+			batch = nil
+		}
+
 		batchRecordCount++
+		batchRequestSize += recordRequestSize
 		batch = append(batch, record)
 
 		if batchRecordCount >= k.maxRecordsPerRequest {
@@ -211,7 +232,7 @@ func (k *D2LKinesisOutput) putRecordBatches(
 	return allFailedRecords, nil
 }
 
-func (k *D2LKinesisOutput) putRecords(
+func (k *d2lKinesisOutput) putRecords(
 	records []*kinesis.PutRecordsRequestEntry,
 ) []*kinesis.PutRecordsRequestEntry {
 
@@ -222,7 +243,10 @@ func (k *D2LKinesisOutput) putRecords(
 		StreamName: aws.String(k.StreamName),
 	}
 
+	start := time.Now()
 	resp, err := k.svc.PutRecords(payload)
+	duration := time.Since(start)
+
 	if err != nil {
 
 		k.Log.Warnf(
@@ -236,9 +260,10 @@ func (k *D2LKinesisOutput) putRecords(
 	successfulRecordCount := int64(totalRecordCount) - *resp.FailedRecordCount
 
 	k.Log.Debugf(
-		"Wrote %+v of %+v record(s) to Kinesis",
+		"Wrote %+v of %+v record(s) to Kinesis in %s",
 		successfulRecordCount,
 		totalRecordCount,
+		duration.String(),
 	)
 
 	var failedRecords []*kinesis.PutRecordsRequestEntry
@@ -258,24 +283,17 @@ func (k *D2LKinesisOutput) putRecords(
 
 func init() {
 	outputs.Add("d2l_kinesis", func() telegraf.Output {
-		return &D2LKinesisOutput{
+		return &d2lKinesisOutput{
 
 			MaxRecordRetries: defaultMaxRecordRetries,
 			MaxRecordSize:    awsMaxRecordSize,
+
+			maxRecordsPerRequest: awsMaxRecordsPerRequest,
+			maxRequestSize:       awsMaxRequestSize,
 		}
 	})
 }
 
-func calculateMaxRecordsPerRequest(
-	maxRecordSize int,
-) int {
-
-	maxRequestSize := float64(awsMaxRequestSize)
-	maxRecordsPerRequest := int(math.Floor(maxRequestSize / float64(maxRecordSize)))
-
-	if maxRecordsPerRequest > awsMaxRecordsPerRequest {
-		return awsMaxRecordsPerRequest
-	}
-
-	return maxRecordsPerRequest
+func calculateRequestOverheadSize(streamName string) int {
+	return len("{\"Records\":[],\"StreamName\":\"\"}") + len(streamName)
 }
