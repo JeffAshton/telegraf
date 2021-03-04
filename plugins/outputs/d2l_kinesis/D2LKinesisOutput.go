@@ -129,8 +129,6 @@ func (k *d2lKinesisOutput) SetSerializer(serializer serializers.Serializer) {
 // Write takes in group of points to be written to the Output
 func (k *d2lKinesisOutput) Write(metrics []telegraf.Metric) error {
 
-	var recordIterator kinesisRecordIterator
-
 	metricsCount := len(metrics)
 	if metricsCount == 0 {
 		return nil
@@ -146,7 +144,7 @@ func (k *d2lKinesisOutput) Write(metrics []telegraf.Metric) error {
 		return generatorErr
 	}
 
-	var i int = 0
+	attempt := 0
 	for {
 
 		failedRecords, err := k.putRecordBatches(recordIterator)
@@ -159,14 +157,14 @@ func (k *d2lKinesisOutput) Write(metrics []telegraf.Metric) error {
 			return nil
 		}
 
-		i++
-		if i > k.MaxRecordRetries {
+		attempt++
+		if attempt > k.MaxRecordRetries {
 
 			k.Log.Warnf(
 				"Unable to write %+v of %+v record(s) to Kinesis after %+v attempts",
 				failedCount,
 				metricsCount,
-				i,
+				attempt,
 			)
 
 			return nil
