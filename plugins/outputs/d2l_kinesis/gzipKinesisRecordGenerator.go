@@ -58,7 +58,7 @@ type gzipKinesisRecordGenerator struct {
 	writer *gzip.Writer
 }
 
-func (g *gzipKinesisRecordGenerator) getPartitionKey() string {
+func (g *gzipKinesisRecordGenerator) generatePartitionKey() string {
 	id, err := uuid.NewV4()
 	if err != nil {
 		g.log.Errorf("Failed to generate partition key: %s", err.Error())
@@ -68,7 +68,7 @@ func (g *gzipKinesisRecordGenerator) getPartitionKey() string {
 	return pk
 }
 
-func (g *gzipKinesisRecordGenerator) emitRecord() (*kinesis.PutRecordsRequestEntry, error) {
+func (g *gzipKinesisRecordGenerator) yieldRecord() (*kinesis.PutRecordsRequestEntry, error) {
 
 	closeErr := g.writer.Close()
 	if closeErr != nil {
@@ -76,7 +76,7 @@ func (g *gzipKinesisRecordGenerator) emitRecord() (*kinesis.PutRecordsRequestEnt
 	}
 
 	data := g.buffer.Bytes()
-	partitionKey := g.getPartitionKey()
+	partitionKey := g.generatePartitionKey()
 
 	record := kinesis.PutRecordsRequestEntry{
 		Data:         data,
@@ -126,16 +126,16 @@ func (g *gzipKinesisRecordGenerator) Next() (*kinesis.PutRecordsRequestEntry, er
 			}
 
 			g.index = index
-			return g.emitRecord()
+			return g.yieldRecord()
 		}
 
-		bytesWritten, writeErr := g.writer.Write(bytes)
+		writeCount, writeErr := g.writer.Write(bytes)
 		if writeErr != nil {
 			return nil, writeErr
 		}
-		recordSize += bytesWritten
+		recordSize += writeCount
 	}
 
-	g.index = index + 1
-	return g.emitRecord()
+	g.index = index
+	return g.yieldRecord()
 }
