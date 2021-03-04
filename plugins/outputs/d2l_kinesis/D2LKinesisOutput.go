@@ -129,12 +129,11 @@ func (k *d2lKinesisOutput) SetSerializer(serializer serializers.Serializer) {
 // Write takes in group of points to be written to the Output
 func (k *d2lKinesisOutput) Write(metrics []telegraf.Metric) error {
 
-	metricsCount := len(metrics)
-	if metricsCount == 0 {
+	if len(metrics) == 0 {
 		return nil
 	}
 
-	recordIterator, generatorErr := createGZipKinesisRecordGenerator(
+	generator, generatorErr := createGZipKinesisRecordGenerator(
 		k.Log,
 		k.MaxRecordSize,
 		metrics,
@@ -143,6 +142,13 @@ func (k *d2lKinesisOutput) Write(metrics []telegraf.Metric) error {
 	if generatorErr != nil {
 		return generatorErr
 	}
+
+	return k.writeRecords(generator)
+}
+
+func (k *d2lKinesisOutput) writeRecords(
+	recordIterator kinesisRecordIterator,
+) error {
 
 	attempt := 0
 	for {
@@ -160,10 +166,9 @@ func (k *d2lKinesisOutput) Write(metrics []telegraf.Metric) error {
 		attempt++
 		if attempt > k.MaxRecordRetries {
 
-			k.Log.Warnf(
-				"Unable to write %+v of %+v record(s) to Kinesis after %+v attempts",
+			k.Log.Errorf(
+				"Unable to write %+v record(s) to Kinesis after %+v attempts",
 				failedCount,
-				metricsCount,
 				attempt,
 			)
 
@@ -206,6 +211,7 @@ func (k *d2lKinesisOutput) putRecordBatches(
 			allFailedRecords = append(allFailedRecords, failedRecords...)
 
 			batchRecordCount = 0
+			batchRequestSize = 0
 			batch = nil
 		}
 
@@ -218,6 +224,7 @@ func (k *d2lKinesisOutput) putRecordBatches(
 			allFailedRecords = append(allFailedRecords, failedRecords...)
 
 			batchRecordCount = 0
+			batchRequestSize = 0
 			batch = nil
 		}
 	}
@@ -266,8 +273,7 @@ func (k *d2lKinesisOutput) putRecords(
 
 	var failedRecords []*kinesis.PutRecordsRequestEntry
 
-	failed := *resp.FailedRecordCount
-	if failed > 0 {
+	if *resp.FailedRecordCount > 0 {
 
 		for i := 0; i < totalRecordCount; i++ {
 			if resp.Records[i].ErrorCode != nil {
