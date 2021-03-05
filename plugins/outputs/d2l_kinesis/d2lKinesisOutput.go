@@ -272,8 +272,9 @@ func (k *d2lKinesisOutput) putRecords(
 	if err != nil {
 
 		k.Log.Warnf(
-			"Unable to write %+v records to Kinesis : %s",
+			"Unable to write %+v records to Kinesis in %s: %s",
 			totalRecordCount,
+			duration.String(),
 			err.Error(),
 		)
 		return records
