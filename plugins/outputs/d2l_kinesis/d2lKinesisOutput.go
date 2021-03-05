@@ -114,7 +114,7 @@ func (k *d2lKinesisOutput) Connect() error {
 	}
 
 	if k.MaxRecordSize > awsMaxRecordSize {
-		return fmt.Errorf("max_record_size must be less than or equal to the aws limit of %+d bytes", awsMaxRecordSize)
+		return fmt.Errorf("max_record_size must be less than or equal to the aws limit of %d bytes", awsMaxRecordSize)
 	}
 
 	credentialConfig := &internalaws.CredentialConfig{
@@ -196,7 +196,7 @@ func (k *d2lKinesisOutput) putRecordBatchesWithRetry(
 			}
 
 			k.Log.Errorf(
-				"Unable to write %+v record(s) to Kinesis after %+v attempts; %+v metrics dropped",
+				"Unable to write %d record(s) to Kinesis after %d attempts; %d metrics dropped",
 				failedCount,
 				attempt,
 				dropped,
@@ -206,7 +206,7 @@ func (k *d2lKinesisOutput) putRecordBatchesWithRetry(
 		}
 
 		k.Log.Debugf(
-			"Retrying %+v record(s)",
+			"Retrying %d record(s)",
 			failedCount,
 		)
 		recordIterator = createKinesisRecordSet(failedRecords)
@@ -288,7 +288,7 @@ func (k *d2lKinesisOutput) putRecords(
 	if err != nil {
 
 		k.Log.Warnf(
-			"Unable to write %+v records to Kinesis in %s: %s",
+			"Unable to write %d records to Kinesis in %s: %s",
 			totalRecordCount,
 			duration.String(),
 			err.Error(),
@@ -299,7 +299,7 @@ func (k *d2lKinesisOutput) putRecords(
 	successfulRecordCount := int64(totalRecordCount) - *resp.FailedRecordCount
 
 	k.Log.Debugf(
-		"Wrote %+v of %+v record(s) to Kinesis in %s",
+		"Wrote %d of %d record(s) to Kinesis in %s",
 		successfulRecordCount,
 		totalRecordCount,
 		duration.String(),
