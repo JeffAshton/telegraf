@@ -121,6 +121,7 @@ func (k *d2lKinesisOutput) Connect() error {
 	generator, generatorErr := createGZipKinesisRecordGenerator(
 		k.Log,
 		k.MaxRecordSize,
+		generateRandomPartitionKey,
 		k.serializer,
 	)
 	if generatorErr != nil {

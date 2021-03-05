@@ -4,11 +4,9 @@ import (
 	"bytes"
 	"compress/flate"
 	"compress/gzip"
-	"encoding/base64"
 	"math"
 
 	"github.com/aws/aws-sdk-go/service/kinesis"
-	"github.com/gofrs/uuid"
 	"github.com/influxdata/telegraf"
 	"github.com/influxdata/telegraf/plugins/serializers"
 )
@@ -19,6 +17,7 @@ const gzipFooterSize = 8
 func createGZipKinesisRecordGenerator(
 	log telegraf.Logger,
 	maxRecordSize int,
+	pkGenerator partitionKeyGenerator,
 	serializer serializers.Serializer,
 ) (kinesisRecordGenerator, error) {
 
@@ -32,6 +31,7 @@ func createGZipKinesisRecordGenerator(
 	generator := &gzipKinesisRecordGenerator{
 		log:           log,
 		maxRecordSize: maxRecordSize,
+		pkGenerator:   pkGenerator,
 		serializer:    serializer,
 
 		buffer: buffer,
@@ -47,6 +47,7 @@ type gzipKinesisRecordGenerator struct {
 	buffer        *bytes.Buffer
 	log           telegraf.Logger
 	maxRecordSize int
+	pkGenerator   partitionKeyGenerator
 	serializer    serializers.Serializer
 	writer        *gzip.Writer
 
@@ -67,16 +68,6 @@ func (g *gzipKinesisRecordGenerator) Reset(
 	g.metricsCount = len(metrics)
 }
 
-func (g *gzipKinesisRecordGenerator) generatePartitionKey() string {
-	id, err := uuid.NewV4()
-	if err != nil {
-		g.log.Errorf("Failed to generate partition key: %s", err.Error())
-		return "default"
-	}
-	pk := base64.StdEncoding.EncodeToString(id.Bytes())
-	return pk
-}
-
 func (g *gzipKinesisRecordGenerator) yieldRecord(
 	metrics int,
 ) (*kinesisRecord, error) {
@@ -87,7 +78,7 @@ func (g *gzipKinesisRecordGenerator) yieldRecord(
 	}
 
 	data := g.buffer.Next(g.buffer.Len())
-	partitionKey := g.generatePartitionKey()
+	partitionKey := g.pkGenerator()
 
 	entry := &kinesis.PutRecordsRequestEntry{
 		Data:         data,
@@ -108,7 +99,7 @@ func (g *gzipKinesisRecordGenerator) Next() (*kinesisRecord, error) {
 
 	index := startIndex
 	recordMetricCount := 0
-	recordSize := gzipHeaderSize
+	recordSizeEstimator := createGZipSizeEstimator()
 
 	for ; index < g.metricsCount; index++ {
 		metric := g.metrics[index]
@@ -124,35 +115,39 @@ func (g *gzipKinesisRecordGenerator) Next() (*kinesisRecord, error) {
 		}
 
 		bytesCount := len(bytes)
-		maxCompressedBytes := bytesCount + 5*int((math.Floor(float64(bytesCount)/16383)+1))
 
-		maxPotentialRecordSize := recordSize + maxCompressedBytes + 5 + gzipFooterSize
-		if maxPotentialRecordSize > g.maxRecordSize {
+		if recordSizeEstimator.MaxPotentialSizeWith(bytesCount) > g.maxRecordSize {
 
-			if recordMetricCount == 0 {
-				g.log.Warnf(
-					"Dropping excessively large '%s' metric",
-					metric.Name(),
-				)
-				continue
+			flushErr := g.writer.Flush()
+			if flushErr != nil {
+				return nil, flushErr
 			}
 
-			g.index = index
-			return g.yieldRecord(recordMetricCount)
+			// commit the flushed buffer length
+			recordSizeEstimator.Commit(g.buffer.Len())
+
+			if recordSizeEstimator.MaxPotentialSizeWith(bytesCount) > g.maxRecordSize {
+
+				if recordMetricCount == 0 {
+					g.log.Warnf(
+						"Dropping excessively large '%s' metric",
+						metric.Name(),
+					)
+					continue
+				}
+
+				g.index = index
+				return g.yieldRecord(recordMetricCount)
+			}
 		}
 
-		_, writeErr := g.writer.Write(bytes)
+		count, writeErr := g.writer.Write(bytes)
 		if writeErr != nil {
 			return nil, writeErr
 		}
 
-		flushErr := g.writer.Flush()
-		if flushErr != nil {
-			return nil, flushErr
-		}
-
 		recordMetricCount++
-		recordSize = g.buffer.Len()
+		recordSizeEstimator.RecordBytes(count)
 	}
 
 	if recordMetricCount > 0 {
@@ -161,4 +156,33 @@ func (g *gzipKinesisRecordGenerator) Next() (*kinesisRecord, error) {
 	}
 
 	return nil, nil
+}
+
+func createGZipSizeEstimator() gZipSizeEstimator {
+	return gZipSizeEstimator{
+		bytesCommited: gzipHeaderSize + gzipFooterSize,
+		bytesPending:  0,
+	}
+}
+
+type gZipSizeEstimator struct {
+	bytesCommited int
+	bytesPending  int
+}
+
+func (e *gZipSizeEstimator) RecordBytes(bytes int) {
+	e.bytesPending += bytes
+}
+
+func (e *gZipSizeEstimator) Commit(bytes int) {
+	e.bytesCommited = bytes + gzipFooterSize
+	e.bytesPending = 0
+}
+
+func (e *gZipSizeEstimator) MaxPotentialSizeWith(additionalBytes int) int {
+
+	bytesCount := e.bytesPending + additionalBytes
+	blocksOverhead := 5 * int((math.Floor(float64(bytesCount)/16383) + 1))
+
+	return e.bytesCommited + bytesCount + blocksOverhead
 }
