@@ -271,13 +271,13 @@ func (k *d2lKinesisOutput) putRecords(
 
 	totalRecordCount := len(records)
 
-	requestRecords := []*kinesis.PutRecordsRequestEntry{}
-	for _, record := range records {
-		requestRecords = append(requestRecords, record.Entry)
+	entries := make([]*kinesis.PutRecordsRequestEntry, totalRecordCount)
+	for i, record := range records {
+		entries[i] = record.Entry
 	}
 
 	payload := &kinesis.PutRecordsInput{
-		Records:    requestRecords,
+		Records:    entries,
 		StreamName: aws.String(k.StreamName),
 	}
 
