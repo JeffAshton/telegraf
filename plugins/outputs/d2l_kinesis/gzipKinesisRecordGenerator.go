@@ -69,7 +69,9 @@ func (g *gzipKinesisRecordGenerator) generatePartitionKey() string {
 	return pk
 }
 
-func (g *gzipKinesisRecordGenerator) yieldRecord() (*kinesis.PutRecordsRequestEntry, error) {
+func (g *gzipKinesisRecordGenerator) yieldRecord(
+	metrics int,
+) (*kinesisRecord, error) {
 
 	closeErr := g.writer.Close()
 	if closeErr != nil {
@@ -79,15 +81,17 @@ func (g *gzipKinesisRecordGenerator) yieldRecord() (*kinesis.PutRecordsRequestEn
 	data := g.buffer.Bytes()
 	partitionKey := g.generatePartitionKey()
 
-	record := kinesis.PutRecordsRequestEntry{
+	entry := kinesis.PutRecordsRequestEntry{
 		Data:         data,
 		PartitionKey: &partitionKey,
 	}
 
+	record := createKinesisRecord(&entry, metrics)
+
 	return &record, nil
 }
 
-func (g *gzipKinesisRecordGenerator) Next() (*kinesis.PutRecordsRequestEntry, error) {
+func (g *gzipKinesisRecordGenerator) Next() (*kinesisRecord, error) {
 
 	startIndex := g.index
 	if startIndex >= g.metricsCount {
@@ -98,7 +102,8 @@ func (g *gzipKinesisRecordGenerator) Next() (*kinesis.PutRecordsRequestEntry, er
 	g.writer.Reset(g.buffer)
 
 	index := startIndex
-	recordSize := gzipHeaderSize + gzipFooterSize
+	recordMetricCount := 0
+	recordSize := gzipHeaderSize
 
 	for ; index < g.metricsCount; index++ {
 		metric := g.metrics[index]
@@ -116,9 +121,10 @@ func (g *gzipKinesisRecordGenerator) Next() (*kinesis.PutRecordsRequestEntry, er
 		bytesCount := len(bytes)
 		maxCompressedBytes := bytesCount + 5*int((math.Floor(float64(bytesCount)/16383)+1))
 
-		if recordSize+maxCompressedBytes > g.maxRecordSize {
+		maxPotentialRecordSize := recordSize + maxCompressedBytes + 5 + gzipFooterSize
+		if maxPotentialRecordSize > g.maxRecordSize {
 
-			if index == startIndex {
+			if recordMetricCount == 0 {
 				g.log.Warnf(
 					"Dropping excessively large '%s' metric",
 					metric.Name(),
@@ -127,7 +133,7 @@ func (g *gzipKinesisRecordGenerator) Next() (*kinesis.PutRecordsRequestEntry, er
 			}
 
 			g.index = index
-			return g.yieldRecord()
+			return g.yieldRecord(recordMetricCount)
 		}
 
 		_, writeErr := g.writer.Write(bytes)
@@ -140,9 +146,14 @@ func (g *gzipKinesisRecordGenerator) Next() (*kinesis.PutRecordsRequestEntry, er
 			return nil, flushErr
 		}
 
-		recordSize = g.buffer.Len() + gzipFooterSize
+		recordMetricCount++
+		recordSize = g.buffer.Len()
 	}
 
-	g.index = index + 1
-	return g.yieldRecord()
+	if recordMetricCount > 0 {
+		g.index = index + 1
+		return g.yieldRecord(recordMetricCount)
+	}
+
+	return nil, nil
 }

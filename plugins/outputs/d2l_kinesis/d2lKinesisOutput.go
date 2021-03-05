@@ -190,10 +190,16 @@ func (k *d2lKinesisOutput) putRecordBatchesWithRetry(
 		attempt++
 		if attempt > k.MaxRecordRetries {
 
+			dropped := 0
+			for _, record := range failedRecords {
+				dropped += record.Metrics
+			}
+
 			k.Log.Errorf(
-				"Unable to write %+v record(s) to Kinesis after %+v attempts",
+				"Unable to write %+v record(s) to Kinesis after %+v attempts; %+v metrics dropped",
 				failedCount,
 				attempt,
+				dropped,
 			)
 
 			return nil
@@ -209,13 +215,13 @@ func (k *d2lKinesisOutput) putRecordBatchesWithRetry(
 
 func (k *d2lKinesisOutput) putRecordBatches(
 	recordIterator kinesisRecordIterator,
-) ([]*kinesis.PutRecordsRequestEntry, error) {
+) ([]*kinesisRecord, error) {
 
 	batchRecordCount := 0
 	batchRequestSize := 0
-	batch := []*kinesis.PutRecordsRequestEntry{}
+	batch := []*kinesisRecord{}
 
-	allFailedRecords := []*kinesis.PutRecordsRequestEntry{}
+	allFailedRecords := []*kinesisRecord{}
 
 	for {
 		record, recordErr := recordIterator.Next()
@@ -226,9 +232,7 @@ func (k *d2lKinesisOutput) putRecordBatches(
 			break
 		}
 
-		// Partition keys are included in the limit calculation.
-		// This is assuming partition keys are ASCII.
-		recordRequestSize := len(record.Data) + len(*record.PartitionKey)
+		recordRequestSize := record.RequestSize
 		if batchRequestSize+recordRequestSize > k.maxRequestSize {
 
 			failedRecords := k.putRecords(batch)
@@ -262,13 +266,18 @@ func (k *d2lKinesisOutput) putRecordBatches(
 }
 
 func (k *d2lKinesisOutput) putRecords(
-	records []*kinesis.PutRecordsRequestEntry,
-) []*kinesis.PutRecordsRequestEntry {
+	records []*kinesisRecord,
+) []*kinesisRecord {
 
 	totalRecordCount := len(records)
 
+	requestRecords := []*kinesis.PutRecordsRequestEntry{}
+	for _, record := range records {
+		requestRecords = append(requestRecords, record.Entry)
+	}
+
 	payload := &kinesis.PutRecordsInput{
-		Records:    records,
+		Records:    requestRecords,
 		StreamName: aws.String(k.StreamName),
 	}
 
@@ -296,7 +305,7 @@ func (k *d2lKinesisOutput) putRecords(
 		duration.String(),
 	)
 
-	var failedRecords []*kinesis.PutRecordsRequestEntry
+	var failedRecords []*kinesisRecord
 
 	if *resp.FailedRecordCount > 0 {
 

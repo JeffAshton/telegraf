@@ -1,11 +1,7 @@
 package d2lkinesis
 
-import (
-	"github.com/aws/aws-sdk-go/service/kinesis"
-)
-
 func createKinesisRecordSet(
-	records []*kinesis.PutRecordsRequestEntry,
+	records []*kinesisRecord,
 ) kinesisRecordIterator {
 
 	return &kinesisRecordSet{
@@ -20,10 +16,10 @@ type kinesisRecordSet struct {
 
 	count   int
 	index   int
-	records []*kinesis.PutRecordsRequestEntry
+	records []*kinesisRecord
 }
 
-func (s *kinesisRecordSet) Next() (*kinesis.PutRecordsRequestEntry, error) {
+func (s *kinesisRecordSet) Next() (*kinesisRecord, error) {
 
 	index := s.index
 	if index >= s.count {
