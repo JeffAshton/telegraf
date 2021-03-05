@@ -1,6 +1,7 @@
 package d2lkinesis
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
@@ -30,7 +31,7 @@ type (
 		Token       string `toml:"token"`
 		EndpointURL string `toml:"endpoint_url"`
 
-		StreamName string `toml:"streamname"`
+		StreamName string `toml:"stream_name"`
 
 		MaxRecordRetries int `toml:"max_record_retries"`
 		MaxRecordSize    int `toml:"max_record_size"`
@@ -69,7 +70,9 @@ var sampleConfig = `
   # endpoint_url = ""
 
   ## Kinesis StreamName must exist prior to starting telegraf.
-  streamname = "StreamName"
+  stream_name = "StreamName"
+  # max_record_retries = 10
+  # max_record_size = 1048576
 
   ## Data format to output.
   ## Each data format has its own unique set of configuration options, read
@@ -91,7 +94,21 @@ func (k *d2lKinesisOutput) Description() string {
 // Connect to the Output; connect is only called once when the plugin starts
 func (k *d2lKinesisOutput) Connect() error {
 
-	k.maxRecordsPerRequest = awsMaxRecordsPerRequest
+	if k.StreamName == "" {
+		return fmt.Errorf("stream_name is required")
+	}
+
+	if k.MaxRecordRetries < 0 {
+		return fmt.Errorf("max_record_retries must be greater than or equal to 0")
+	}
+
+	if k.MaxRecordSize < 1000 {
+		return fmt.Errorf("max_record_size must be greater than 1000 bytes")
+	}
+
+	if k.MaxRecordSize > awsMaxRecordSize {
+		return fmt.Errorf("max_record_size must be less than or equal to the aws limit of %+d bytes", awsMaxRecordSize)
+	}
 
 	credentialConfig := &internalaws.CredentialConfig{
 		Region:      k.Region,
@@ -143,10 +160,10 @@ func (k *d2lKinesisOutput) Write(metrics []telegraf.Metric) error {
 		return generatorErr
 	}
 
-	return k.writeRecords(generator)
+	return k.putRecordBatchesWithRetry(generator)
 }
 
-func (k *d2lKinesisOutput) writeRecords(
+func (k *d2lKinesisOutput) putRecordBatchesWithRetry(
 	recordIterator kinesisRecordIterator,
 ) error {
 
