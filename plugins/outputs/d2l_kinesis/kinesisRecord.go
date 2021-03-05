@@ -7,13 +7,13 @@ import (
 func createKinesisRecord(
 	entry *kinesis.PutRecordsRequestEntry,
 	metrics int,
-) kinesisRecord {
+) *kinesisRecord {
 
 	// Partition keys are included in the request size calculation.
 	// This is assuming partition keys are ASCII.
 	requestSize := len(entry.Data) + len(*entry.PartitionKey)
 
-	return kinesisRecord{
+	return &kinesisRecord{
 		Entry:       entry,
 		Metrics:     metrics,
 		RequestSize: requestSize,

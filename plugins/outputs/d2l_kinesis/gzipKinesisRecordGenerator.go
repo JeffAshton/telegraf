@@ -81,14 +81,14 @@ func (g *gzipKinesisRecordGenerator) yieldRecord(
 	data := g.buffer.Bytes()
 	partitionKey := g.generatePartitionKey()
 
-	entry := kinesis.PutRecordsRequestEntry{
+	entry := &kinesis.PutRecordsRequestEntry{
 		Data:         data,
 		PartitionKey: &partitionKey,
 	}
 
-	record := createKinesisRecord(&entry, metrics)
+	record := createKinesisRecord(entry, metrics)
 
-	return &record, nil
+	return record, nil
 }
 
 func (g *gzipKinesisRecordGenerator) Next() (*kinesisRecord, error) {
