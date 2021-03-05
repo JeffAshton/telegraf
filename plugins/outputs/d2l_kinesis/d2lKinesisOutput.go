@@ -22,6 +22,8 @@ const awsMaxRequestSize = 5242880 // 5 MiB
 
 type (
 	d2lKinesisOutput struct {
+
+		// AWS Kinesis client configs
 		Region      string `toml:"region"`
 		AccessKey   string `toml:"access_key"`
 		SecretKey   string `toml:"secret_key"`
@@ -31,11 +33,12 @@ type (
 		Token       string `toml:"token"`
 		EndpointURL string `toml:"endpoint_url"`
 
-		StreamName string `toml:"stream_name"`
+		// Stream configs
+		MaxRecordRetries int    `toml:"max_record_retries"`
+		MaxRecordSize    int    `toml:"max_record_size"`
+		StreamName       string `toml:"stream_name"`
 
-		MaxRecordRetries int `toml:"max_record_retries"`
-		MaxRecordSize    int `toml:"max_record_size"`
-
+		// Internals
 		Log                  telegraf.Logger `toml:"-"`
 		maxRecordsPerRequest int
 		maxRequestSize       int
@@ -69,10 +72,14 @@ var sampleConfig = `
   ##   ex: endpoint_url = "http://localhost:8000"
   # endpoint_url = ""
 
+  ## The maximum number of times to retry putting an individual Kinesis record
+  # max_record_retries = 10
+
+  ## The maximum Kinesis record size to put
+  # max_record_size = 1048576
+
   ## Kinesis StreamName must exist prior to starting telegraf.
   stream_name = "StreamName"
-  # max_record_retries = 10
-  # max_record_size = 1048576
 
   ## Data format to output.
   ## Each data format has its own unique set of configuration options, read
