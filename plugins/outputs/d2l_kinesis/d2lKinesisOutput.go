@@ -42,6 +42,7 @@ type (
 		Log                  telegraf.Logger `toml:"-"`
 		maxRecordsPerRequest int
 		maxRequestSize       int
+		recordGenerator      kinesisRecordGenerator
 		serializer           serializers.Serializer
 		svc                  kinesisiface.KinesisAPI
 	}
@@ -117,6 +118,16 @@ func (k *d2lKinesisOutput) Connect() error {
 		return fmt.Errorf("max_record_size must be less than or equal to the aws limit of %d bytes", awsMaxRecordSize)
 	}
 
+	generator, generatorErr := createGZipKinesisRecordGenerator(
+		k.Log,
+		k.MaxRecordSize,
+		k.serializer,
+	)
+	if generatorErr != nil {
+		return generatorErr
+	}
+	k.recordGenerator = generator
+
 	credentialConfig := &internalaws.CredentialConfig{
 		Region:      k.Region,
 		AccessKey:   k.AccessKey,
@@ -157,17 +168,9 @@ func (k *d2lKinesisOutput) Write(metrics []telegraf.Metric) error {
 		return nil
 	}
 
-	generator, generatorErr := createGZipKinesisRecordGenerator(
-		k.Log,
-		k.MaxRecordSize,
-		metrics,
-		k.serializer,
-	)
-	if generatorErr != nil {
-		return generatorErr
-	}
+	k.recordGenerator.Reset(metrics)
 
-	return k.putRecordBatchesWithRetry(generator)
+	return k.putRecordBatchesWithRetry(k.recordGenerator)
 }
 
 func (k *d2lKinesisOutput) putRecordBatchesWithRetry(
@@ -276,13 +279,13 @@ func (k *d2lKinesisOutput) putRecords(
 		entries[i] = record.Entry
 	}
 
-	payload := &kinesis.PutRecordsInput{
+	payload := kinesis.PutRecordsInput{
 		Records:    entries,
 		StreamName: aws.String(k.StreamName),
 	}
 
 	start := time.Now()
-	resp, err := k.svc.PutRecords(payload)
+	resp, err := k.svc.PutRecords(&payload)
 	duration := time.Since(start)
 
 	if err != nil {

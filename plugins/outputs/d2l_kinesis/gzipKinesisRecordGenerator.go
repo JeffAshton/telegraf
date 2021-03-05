@@ -19,9 +19,8 @@ const gzipFooterSize = 8
 func createGZipKinesisRecordGenerator(
 	log telegraf.Logger,
 	maxRecordSize int,
-	metrics []telegraf.Metric,
 	serializer serializers.Serializer,
-) (kinesisRecordIterator, error) {
+) (kinesisRecordGenerator, error) {
 
 	buffer := bytes.NewBuffer([]byte{})
 
@@ -33,12 +32,9 @@ func createGZipKinesisRecordGenerator(
 	generator := &gzipKinesisRecordGenerator{
 		log:           log,
 		maxRecordSize: maxRecordSize,
-		metrics:       metrics,
-		metricsCount:  len(metrics),
 		serializer:    serializer,
 
 		buffer: buffer,
-		index:  0,
 		writer: writer,
 	}
 
@@ -48,15 +44,27 @@ func createGZipKinesisRecordGenerator(
 type gzipKinesisRecordGenerator struct {
 	kinesisRecordIterator
 
+	buffer        *bytes.Buffer
 	log           telegraf.Logger
 	maxRecordSize int
-	metricsCount  int
-	metrics       []telegraf.Metric
 	serializer    serializers.Serializer
+	writer        *gzip.Writer
 
-	buffer *bytes.Buffer
-	index  int
-	writer *gzip.Writer
+	index        int
+	metricsCount int
+	metrics      []telegraf.Metric
+}
+
+func (g *gzipKinesisRecordGenerator) Reset(
+	metrics []telegraf.Metric,
+) {
+
+	g.buffer.Reset()
+	g.writer.Reset(g.buffer)
+
+	g.index = 0
+	g.metrics = metrics
+	g.metricsCount = len(metrics)
 }
 
 func (g *gzipKinesisRecordGenerator) generatePartitionKey() string {
@@ -78,7 +86,7 @@ func (g *gzipKinesisRecordGenerator) yieldRecord(
 		return nil, closeErr
 	}
 
-	data := g.buffer.Bytes()
+	data := g.buffer.Next(g.buffer.Len())
 	partitionKey := g.generatePartitionKey()
 
 	entry := &kinesis.PutRecordsRequestEntry{
@@ -97,9 +105,6 @@ func (g *gzipKinesisRecordGenerator) Next() (*kinesisRecord, error) {
 	if startIndex >= g.metricsCount {
 		return nil, nil
 	}
-
-	g.buffer.Reset()
-	g.writer.Reset(g.buffer)
 
 	index := startIndex
 	recordMetricCount := 0
