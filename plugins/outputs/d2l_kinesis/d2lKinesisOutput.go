@@ -297,7 +297,3 @@ func init() {
 		}
 	})
 }
-
-func calculateRequestOverheadSize(streamName string) int {
-	return len("{\"Records\":[],\"StreamName\":\"\"}") + len(streamName)
-}
