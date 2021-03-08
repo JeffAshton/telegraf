@@ -2,9 +2,9 @@ package d2lkinesis
 
 import (
 	"bytes"
-	"compress/flate"
 	"compress/gzip"
 	"encoding/base64"
+	"io"
 	"testing"
 
 	"github.com/aws/aws-sdk-go/service/kinesis"
@@ -24,7 +24,7 @@ func testPartitionKeyProvider() string {
 	return testPartitionKey
 }
 
-func TestCreateGZipKinesisRecordGenerator(t *testing.T) {
+func Test_CreateGZipKinesisRecordGenerator(t *testing.T) {
 	assert := assert.New(t)
 
 	generator, err := createGZipKinesisRecordGenerator(
@@ -49,7 +49,7 @@ func Test_GZipKinesisRecordGenerator_ZeroRecords(t *testing.T) {
 	assert.Nil(record)
 }
 
-func Test_GZipKinesisRecordGenerator_SingleRecord(t *testing.T) {
+func Test_GZipKinesisRecordGenerator_SingleMetric_SingleRecord(t *testing.T) {
 	assert := assert.New(t)
 
 	metric, metricData := createTestMetric(t, "test", influxSerializer)
@@ -65,7 +65,90 @@ func Test_GZipKinesisRecordGenerator_SingleRecord(t *testing.T) {
 	assert.NoError(err, "Next should not error")
 	assert.Nil(record2)
 
-	assertKinesisRecord(
+	assertGZippedKinesisRecord(
+		assert,
+		createTestKinesisRecord(t, 1, metricData),
+		record1,
+	)
+}
+
+func Test_GZipKinesisRecordGenerator_TwoMetrics_SingleRecord(t *testing.T) {
+	assert := assert.New(t)
+
+	metric1, metric1Data := createTestMetric(t, "metric1", influxSerializer)
+	metric2, metric2Data := createTestMetric(t, "metric2", influxSerializer)
+
+	generator := createTestGZipKinesisRecordGenerator(t, 1024)
+	generator.Reset([]telegraf.Metric{metric1, metric2})
+
+	record1, err := generator.Next()
+	assert.NoError(err, "Next should not error")
+	assert.NotNil(record1)
+
+	record2, err := generator.Next()
+	assert.NoError(err, "Next should not error")
+	assert.Nil(record2)
+
+	assertGZippedKinesisRecord(
+		assert,
+		createTestKinesisRecord(t,
+			2,
+			concatByteSlices(metric1Data, metric2Data),
+		),
+		record1,
+	)
+}
+
+func Test_GZipKinesisRecordGenerator_TwoMetrics_TwoRecords(t *testing.T) {
+	assert := assert.New(t)
+
+	metric1, metric1Data := createTestMetric(t, "metric1", influxSerializer)
+	metric2, metric2Data := createTestMetric(t, "metric2", influxSerializer)
+
+	generator := createTestGZipKinesisRecordGenerator(t, 92)
+	generator.Reset([]telegraf.Metric{metric1, metric2})
+
+	record1, err := generator.Next()
+	assert.NoError(err, "Next should not error")
+	assert.NotNil(record1)
+
+	record2, err := generator.Next()
+	assert.NoError(err, "Next should not error")
+	assert.NotNil(record2)
+
+	record3, err := generator.Next()
+	assert.NoError(err, "Next should not error")
+	assert.Nil(record3)
+
+	assertGZippedKinesisRecord(
+		assert,
+		createTestKinesisRecord(t, 1, metric1Data),
+		record1,
+	)
+	assertGZippedKinesisRecord(
+		assert,
+		createTestKinesisRecord(t, 1, metric2Data),
+		record2,
+	)
+}
+
+func Test_GZipKinesisRecordGenerator_TwoRecords(t *testing.T) {
+	assert := assert.New(t)
+
+	metric, metricData := createTestMetric(t, "test", influxSerializer)
+
+	generator := createTestGZipKinesisRecordGenerator(t, 1024)
+	generator.Reset([]telegraf.Metric{metric})
+
+	record1, err := generator.Next()
+	assert.NoError(err, "Next should not error")
+	assert.NotNil(record1)
+
+	record2, err := generator.Next()
+	assert.NoError(err, "Next should not error")
+	assert.Nil(record2)
+
+	assertGZippedKinesisRecord(
 		assert,
 		createTestKinesisRecord(t, 1, metricData),
 		record1,
@@ -79,7 +162,7 @@ func createTestGZipKinesisRecordGenerator(
 
 	generator, err := createGZipKinesisRecordGenerator(
 		testutil.Logger{},
-		256,
+		maxRecordSize,
 		testPartitionKeyProvider,
 		influxSerializer,
 	)
@@ -102,16 +185,30 @@ func createTestMetric(
 	return metric, data
 }
 
-func assertKinesisRecord(
+func assertGZippedKinesisRecord(
 	assert *assert.Assertions,
 	expected *kinesisRecord,
 	actual *kinesisRecord,
 ) {
 
+	if actual == nil {
+		assert.NotNil(actual, "Actual kinesis record should not be nil")
+		return
+	}
+
+	actualDecompressedData, decompressErr := decompressData(
+		actual.Entry.Data,
+		len(expected.Entry.Data),
+	)
+	if decompressErr != nil {
+		assert.NoError(decompressErr, "Actual Entry.Data should have decompressed")
+		return
+	}
+
 	assert.Equal(
 		base64.StdEncoding.EncodeToString(expected.Entry.Data),
-		base64.StdEncoding.EncodeToString(actual.Entry.Data),
-		"Entry.Data should be as expected",
+		base64.StdEncoding.EncodeToString(actualDecompressedData),
+		"Entry.Data should be as expected when decompressed",
 	)
 
 	assert.Nil(
@@ -134,12 +231,6 @@ func assertKinesisRecord(
 		actual.Metrics,
 		"Metrics should be as expected",
 	)
-
-	assert.Equal(
-		expected.RequestSize,
-		actual.RequestSize,
-		"RequestSize should be as expected",
-	)
 }
 
 func createTestKinesisRecord(
@@ -151,29 +242,62 @@ func createTestKinesisRecord(
 	partitionKey := testPartitionKey
 
 	entry := &kinesis.PutRecordsRequestEntry{
-		Data:         gzipData(t, uncompressedData),
+		Data:         uncompressedData,
 		PartitionKey: &partitionKey,
 	}
 
 	return createKinesisRecord(entry, metrics)
 }
 
-func gzipData(
-	t *testing.T,
+func decompressData(
 	data []byte,
-) []byte {
+	bufferSize int,
+) ([]byte, error) {
 
-	buffer := bytes.NewBuffer([]byte{})
+	compressedReader := bytes.NewReader(data)
 
-	writer, writerErr := gzip.NewWriterLevel(buffer, flate.BestCompression)
-	require.NoError(t, writerErr, "Should create writer")
+	gzipReader, gzipReaderErr := gzip.NewReader(compressedReader)
+	if gzipReaderErr != nil {
+		return nil, gzipReaderErr
+	}
 
-	count, writeErr := writer.Write(data)
-	require.NoError(t, writeErr, "Should write data")
-	require.Equal(t, len(data), count, "Should write all data")
+	result := make([]byte, 0, bufferSize)
+	buffer := make([]byte, bufferSize)
 
-	closeErr := writer.Close()
-	require.NoError(t, closeErr, "Should close gzip writer")
+	for {
+		readCount, readErr := gzipReader.Read(buffer)
 
-	return buffer.Bytes()
+		if readCount > 0 {
+			result = append(result, buffer[0:readCount]...)
+		}
+
+		if readErr != nil {
+			if readErr == io.EOF {
+				break
+			}
+			return nil, readErr
+		}
+	}
+
+	closeErr := gzipReader.Close()
+	if closeErr != nil {
+		return nil, closeErr
+	}
+
+	return result, nil
+}
+
+func concatByteSlices(slices ...[]byte) []byte {
+
+	size := 0
+	for i := 0; i < len(slices); i++ {
+		size += len(slices[i])
+	}
+
+	result := make([]byte, 0, size)
+	for i := 0; i < len(slices); i++ {
+		result = append(result, slices[i]...)
+	}
+
+	return result
 }

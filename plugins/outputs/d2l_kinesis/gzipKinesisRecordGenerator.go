@@ -60,9 +60,6 @@ func (g *gzipKinesisRecordGenerator) Reset(
 	metrics []telegraf.Metric,
 ) {
 
-	g.buffer.Reset()
-	g.writer.Reset(g.buffer)
-
 	g.index = 0
 	g.metrics = metrics
 	g.metricsCount = len(metrics)
@@ -77,7 +74,10 @@ func (g *gzipKinesisRecordGenerator) yieldRecord(
 		return nil, closeErr
 	}
 
-	data := g.buffer.Next(g.buffer.Len())
+	bufferBytes := g.buffer.Bytes()
+	data := make([]byte, len(bufferBytes))
+	copy(data, bufferBytes)
+
 	partitionKey := g.pkGenerator()
 
 	entry := &kinesis.PutRecordsRequestEntry{
@@ -100,6 +100,9 @@ func (g *gzipKinesisRecordGenerator) Next() (*kinesisRecord, error) {
 	index := startIndex
 	recordMetricCount := 0
 	recordSizeEstimator := createGZipSizeEstimator()
+
+	g.buffer.Reset()
+	g.writer.Reset(g.buffer)
 
 	for ; index < g.metricsCount; index++ {
 		metric := g.metrics[index]
