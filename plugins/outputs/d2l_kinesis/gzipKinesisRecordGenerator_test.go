@@ -7,7 +7,6 @@ import (
 	"io"
 	"testing"
 
-	"github.com/aws/aws-sdk-go/service/kinesis"
 	"github.com/influxdata/telegraf"
 	"github.com/influxdata/telegraf/plugins/serializers"
 	"github.com/influxdata/telegraf/plugins/serializers/influx"
@@ -17,12 +16,6 @@ import (
 )
 
 var influxSerializer serializers.Serializer = influx.NewSerializer()
-
-const testPartitionKey string = "abc"
-
-func testPartitionKeyProvider() string {
-	return testPartitionKey
-}
 
 func Test_CreateGZipKinesisRecordGenerator(t *testing.T) {
 	assert := assert.New(t)
@@ -44,9 +37,7 @@ func Test_GZipKinesisRecordGenerator_ZeroRecords(t *testing.T) {
 	generator := createTestGZipKinesisRecordGenerator(t, 1024)
 	generator.Reset([]telegraf.Metric{})
 
-	record, err := generator.Next()
-	assert.NoError(err, "Next should not error")
-	assert.Nil(record)
+	assertEndOfIterator(assert, generator)
 }
 
 func Test_GZipKinesisRecordGenerator_SingleMetric_SingleRecord(t *testing.T) {
@@ -61,13 +52,11 @@ func Test_GZipKinesisRecordGenerator_SingleMetric_SingleRecord(t *testing.T) {
 	assert.NoError(err, "Next should not error")
 	assert.NotNil(record1)
 
-	record2, err := generator.Next()
-	assert.NoError(err, "Next should not error")
-	assert.Nil(record2)
+	assertEndOfIterator(assert, generator)
 
 	assertGZippedKinesisRecord(
 		assert,
-		createTestKinesisRecord(t, 1, metricData),
+		createTestKinesisRecord(1, metricData),
 		record1,
 	)
 }
@@ -85,13 +74,11 @@ func Test_GZipKinesisRecordGenerator_TwoMetrics_SingleRecord(t *testing.T) {
 	assert.NoError(err, "Next should not error")
 	assert.NotNil(record1)
 
-	record2, err := generator.Next()
-	assert.NoError(err, "Next should not error")
-	assert.Nil(record2)
+	assertEndOfIterator(assert, generator)
 
 	assertGZippedKinesisRecord(
 		assert,
-		createTestKinesisRecord(t,
+		createTestKinesisRecord(
 			2,
 			concatByteSlices(metric1Data, metric2Data),
 		),
@@ -116,18 +103,16 @@ func Test_GZipKinesisRecordGenerator_TwoMetrics_TwoRecords(t *testing.T) {
 	assert.NoError(err, "Next should not error")
 	assert.NotNil(record2)
 
-	record3, err := generator.Next()
-	assert.NoError(err, "Next should not error")
-	assert.Nil(record3)
+	assertEndOfIterator(assert, generator)
 
 	assertGZippedKinesisRecord(
 		assert,
-		createTestKinesisRecord(t, 1, metric1Data),
+		createTestKinesisRecord(1, metric1Data),
 		record1,
 	)
 	assertGZippedKinesisRecord(
 		assert,
-		createTestKinesisRecord(t, 1, metric2Data),
+		createTestKinesisRecord(1, metric2Data),
 		record2,
 	)
 }
@@ -144,13 +129,11 @@ func Test_GZipKinesisRecordGenerator_TwoRecords(t *testing.T) {
 	assert.NoError(err, "Next should not error")
 	assert.NotNil(record1)
 
-	record2, err := generator.Next()
-	assert.NoError(err, "Next should not error")
-	assert.Nil(record2)
+	assertEndOfIterator(assert, generator)
 
 	assertGZippedKinesisRecord(
 		assert,
-		createTestKinesisRecord(t, 1, metricData),
+		createTestKinesisRecord(1, metricData),
 		record1,
 	)
 }
@@ -231,22 +214,6 @@ func assertGZippedKinesisRecord(
 		actual.Metrics,
 		"Metrics should be as expected",
 	)
-}
-
-func createTestKinesisRecord(
-	t *testing.T,
-	metrics int,
-	uncompressedData []byte,
-) *kinesisRecord {
-
-	partitionKey := testPartitionKey
-
-	entry := &kinesis.PutRecordsRequestEntry{
-		Data:         uncompressedData,
-		PartitionKey: &partitionKey,
-	}
-
-	return createKinesisRecord(entry, metrics)
 }
 
 func decompressData(
